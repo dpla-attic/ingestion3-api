@@ -1,7 +1,5 @@
+import argparse
 import csv
-import sqlite3
-import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 
 from scripts.ItemHarvester import ItemHarvester
@@ -25,156 +23,55 @@ class LcHarvester:
     user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) ' \
                  'Chrome/35.0.1916.47 Safari/537.36 '
 
-    def __init__(self, db):
-        self.conn = sqlite3.connect(db)
-        self.setupDatabase()
+    def __init__(self):
+        pass
+        # self.conn = sqlite3.connect(db)
 
-    def cleanup(self):
-        if self.conn:
-            self.conn.close()
-
-    def run(self, collections):
-        # if exists, drop and recreate the `collections` table in database file
-        self.setupDatabase()
-
-        # for each collection name, fetch the paginated sitemap files
+    def generateCollectionSitemapUrls(self, collections):
+        sitemap_urls = []
         for collection in collections:
-            print('Fetching sitemap.xml for %s' % collection)
+            sitemap_urls.append(['https://www.loc.gov/collections/%s/sitemap.xml' % collection])
+        return sitemap_urls
 
-            # TODO fetching the sitemaps can fail and should be retryable
-            coll_sitemap_xml = self.fetchCollectionSitemapXml(collection)
-            coll_pages = self.parseCollectionSitemapXml(coll_sitemap_xml)
+    def getCollectionPageUrls(self, coll_sitemap_data):
+        collection_pages = []
+        for page in coll_sitemap_data:
+            for p in self.parseCollectionSitemapXml(page):
+                collection_pages.append([p])
+        return collection_pages
 
-            print('%s has %s pages' % (collection, len(coll_pages)))
+    def getItemUrls(self, collection_page_data):
+        item_pages = []
+        for page in collection_page_data:
+            for p in self.parseItemsFromResponse(page):
+                item_pages.append([p])
+        return item_pages
 
-            # Insert collection pages into `collections` table
-            self.addPagesToCollectionsTable(coll_pages)
-
-            # Fetch pages from `collections` table
-            self.fetchCollectionPages()
-
-    def fetchCollectionPages(self):
-        unfetched_pages = self.getUnfetchedPages()
-        while len(unfetched_pages) > 0:
-            for page in unfetched_pages:
-                print('Requesting %s' % page)
-                try:
-                    # Make request
-                    request = urllib.request.Request(
-                        page,
-                        data=None,
-                        headers={'User-Agent': self.user_agent}
-                    )
-                    response = urllib.request.urlopen(request).read()
-                    results = self.parseItemsFromResponse(response)
-
-                    try:
-                        with self.conn:
-                            cursor = self.conn.cursor()
-                            cursor.execute("UPDATE collections SET data = ? WHERE url = ?", (response, page))
-                    except sqlite3.Error as e:
-                        print('Error update page data for %s: %s' % (page, e))
-
-                    try:
-                        params = {'fo': 'json', 'at': 'item'}
-                        to_db = [(i + '?' + urllib.parse.urlencode(params), None) for i in results]
-                        with self.conn:
-                            cursor = self.conn.cursor()
-                            cursor.executemany("INSERT INTO items (url, data) VALUES (?, ?);", to_db)
-                    except sqlite3.Error as e:
-                        print('Error inserting item urls into `items`: %s' % e)
-
-                # if request failed record url with no data
-                except Exception as e:
-                    print('Error requesting %s: %s' % (page, e))
-            # Get an updated set of unfetched pages
-            unfetched_pages = self.getUnfetchedPages()
-
-    def getUnfetchedPages(self):
-        pages = []
-        with self.conn:
-            cursor = self.conn.cursor()
-            cursor.execute('''SELECT collections.url as 'url' FROM collections WHERE data is null''')
-            for i in cursor.fetchall():
-                pages.append(i[0])
-
-        return pages
-
-    def addPagesToCollectionsTable(self, pages):
-        # FIXME there is a more efficient way to add multiple rows to a table
-        for page in pages:
-            try:
-                with self.conn:
-                    cursor = self.conn.cursor()
-                    cursor.execute('''INSERT INTO 'collections' ('url','data') VALUES (?,?)''', (page, None))
-            except sqlite3.Error as e:
-                print("Error adding %s to `collections` table: %s" % (page, e))
-
-    def fetchCollectionSitemapXml(self, collection):
-        sitemap_url = 'https://www.loc.gov/collections/%s/sitemap.xml' % collection
-        try:
-            request = urllib.request.Request(
-                sitemap_url,
-                data=None,
-                headers={
-                    'User-Agent': self.user_agent
-                }
-            )
-            response = urllib.request.urlopen(request).read()
-            return ET.ElementTree(ET.fromstring(response))
-        except Exception as e:
-            print('Error requesting sitemap %s' % sitemap_url)
+    def parseCollectionSitemapXml(self, rsp):
+        coll_pages = []
+        coll_sitemap_xml = ET.ElementTree(ET.fromstring(rsp))
+        for i in coll_sitemap_xml.getroot().findall('.//{%s}loc' % self.sitemap_ns):
+            coll_pages.append(i.text)
+        return coll_pages
 
     def parseItemsFromResponse(self, rsp):
         items = []
         xml = ET.ElementTree(ET.fromstring(rsp))
         for i in xml.getroot().findall('.//{%s}loc' % self.sitemap_ns):
-            items.append(i.text)
+            if i.text.startswith('http://www.loc.gov/item/'):  # filter out non-items
+                items.append(i.text + "?fo=json&at=item")  # append parameters
         return items
 
-    def parseCollectionSitemapXml(self, coll_sitemap_xml):
-        coll_pages = []
-        for i in coll_sitemap_xml.getroot().findall('.//{%s}loc' % self.sitemap_ns):
-            coll_pages.append(i.text)
-        return coll_pages
-
-    def setupDatabase(self):
-        # Drop existing table and recreate
-        try:
-            with self.conn:
-                cursor = self.conn.cursor()
-                cursor.execute('''DROP TABLE IF EXISTS collections''')
-                cursor.execute('''CREATE TABLE collections ('url','data')''')
-
-                cursor.execute('''DROP TABLE IF EXISTS items''')
-                cursor.execute('''CREATE TABLE items ('url','data')''')
-        except sqlite3.Error as e:
-            print('Failed database setup: %s' % e)
-
-    def printSummary(self):
-        with self.conn:
-            cursor = self.conn.cursor()
-            pageCount = cursor.execute('''SELECT count(*) FROM collections WHERE data is not null''').fetchone()[0]
-            itemCount = cursor.execute('''SELECT count(*) FROM items WHERE url LIKE '%http://www.loc.gov/item%' ''').fetchone()[
-                    0]
-        print('Fetched %s collection sitemap pages\n'
-              'Fetched %s loc.gov/item/ urls' % (pageCount, itemCount))
-
-    def writeItems(self, items_csv):
-        csvWriter = csv.writer(open(items_csv, "w"))
-
-        with self.conn:
-            cursor = self.conn.cursor()
-            cursor.execute('''SELECT url FROM items WHERE url LIKE '%http://www.loc.gov/item%' ''')
-            rows = cursor.fetchall()
-            csvWriter.writerows(rows)
-        print('`items.url` written to %s' % items_csv)
+    def writeUrlsToCsv(self, file, data):
+        fos = open(file, "w")
+        with fos:
+            csv_writer = csv.writer(fos)
+            csv_writer.writerows(data)
 
 
-def main():
-    # FIXME paths and collection names should not be hardcoded
-    db = r"./db/lc-harvest.db"
-    items_csv = "./csv/lc-items.csv"
+def main(args):
+
+    # LC co
     collections = [
         'civil-war-maps',
         'american-revolutionary-war-maps',
@@ -186,50 +83,76 @@ def main():
         'national-photo-company'
     ]
 
-    # Perform collection harvest
-    collection_harvest(db, collections, items_csv)
+    # lc database
+    db = "/Users/scott/dpla/code/ingestion3-api/db/lc-harvest.db"
 
-    # Perform item harvest
-    item_harvest(db, items_csv)
+    # table names
+    sitemap_tbl = 'sitemap'
+    collection_tbl = 'collection'
+    item_tbl = 'item'
 
+    # CSV output files
+    sitemap_csv = "/Users/scott/dpla/code/ingestion3-api/csv/lc-sitemaps.csv"
+    collection_page_csv = "/Users/scott/dpla/code/ingestion3-api/csv/lc-pages.csv"
+    items_csv = "/Users/scott/dpla/code/ingestion3-api/csv/lc-items.csv"
 
-def collection_harvest(db, collections, items_csv):
-    """
-    Runs the harvest of collection pages which will generate a list of item URLs to be fetched
-
-    :param db: Path to database
-    :param collections: List of collection names
-    :param items_csv: Path to write out item URLs
-    :return:
-    """
-    lc = LcHarvester(db)
-
-    # harvest collection pages and item urls
-    lc.run(collections)
-
-    # print a summary
-    lc.printSummary()
-
-    # write items urls out to CSV file
-    lc.writeItems(items_csv)
-
-    # close db connection
-    lc.cleanup()
-
-
-def item_harvest(db, items_csv):
-    """
-    Runs the harvest of item URLs
-    :param db: Path to database
-    :param items_csv: Path to item URL CSV
-    :return:
-    """
+    lc = LcHarvester()
     item_harvester = ItemHarvester(db)
 
-    item_harvester.run(items_csv)
+    """ SITEMAP """
+    # Generate sitemap.xml URLs to request
+    sitemap_urls = lc.generateCollectionSitemapUrls(collections)
+
+    # write sitemap URLs to CSV file
+    lc.writeUrlsToCsv(sitemap_csv, sitemap_urls)
+
+    # Request all collection sitemap URLs in sitemap CSV
+    item_harvester.run(sitemap_tbl, sitemap_csv)
+
+    # get collection pages from sitemap responses
+    collection_sitemap_data = item_harvester.getData(sitemap_tbl)
+
+    # parse the sitemap data and extract the collection page URLs to fetch
+    collection_pages = lc.getCollectionPageUrls(collection_sitemap_data)
+
+    # write collection page URLs to CSV file
+    lc.writeUrlsToCsv(collection_page_csv, collection_pages)
+
+    print('%s collection page URLs written to %s' % (len(collection_pages), collection_page_csv))
+
+    """ COLLECTION PAGES """
+    # request collection pages via ItemHarvester
+    item_harvester.run(collection_tbl, collection_page_csv)
+
+    # get the harvested collection page data
+    collection_page_data = item_harvester.getData(collection_tbl)
+
+    # Extract item urls to harvest from collection_page_data
+    item_urls = lc.getItemUrls(collection_page_data)
+
+    # Write the item urls to a CSV file
+    lc.writeUrlsToCsv(items_csv, item_urls)
+
+    print('%s item URLs written to %s' % (len(item_urls), items_csv))
+
+    """ ITEM PAGES """
+    # harvest item pages
+    item_harvester.run(item_tbl, items_csv)
+
+    # TODO Write item JSON out to individual files
+    item_data = item_harvester.getData(item_tbl)
+
+    print("Harvested %s item records" % len(item_data))
 
     item_harvester.cleanup()
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--resume', help='yes/no - Resume previous run, default=yes', default='no')
+    # parser.add_argument('--foo', help='Foo the program')
+
+    args = parser.parse_args()
+
+    main(args)
