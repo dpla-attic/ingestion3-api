@@ -1,4 +1,4 @@
-import argparse
+import sys
 import csv
 import xml.etree.ElementTree as ET
 
@@ -70,6 +70,12 @@ class LcHarvester:
 
 
 def main(args):
+    if len(args) != 2:
+        print("Not enough arugments passed")
+        sys.exit(-1)
+
+    base_dir = args[1]
+    print("Root directory: %s" % base_dir)
 
     # LC co
     collections = [
@@ -84,7 +90,7 @@ def main(args):
     ]
 
     # lc database
-    db = "/Users/scott/dpla/code/ingestion3-api/db/lc-harvest.db"
+    db = base_dir + "/db/lc-harvest.db"
 
     # table names
     sitemap_tbl = 'sitemap'
@@ -92,9 +98,9 @@ def main(args):
     item_tbl = 'item'
 
     # CSV output files
-    sitemap_csv = "/Users/scott/dpla/code/ingestion3-api/csv/lc-sitemaps.csv"
-    collection_page_csv = "/Users/scott/dpla/code/ingestion3-api/csv/lc-pages.csv"
-    items_csv = "/Users/scott/dpla/code/ingestion3-api/csv/lc-items.csv"
+    sitemap_csv = base_dir + "/csv/lc-sitemaps.csv"
+    collection_page_csv = base_dir + "/csv/lc-pages.csv"
+    items_csv = base_dir + "/csv/lc-items.csv"
 
     lc = LcHarvester()
     item_harvester = ItemHarvester(db)
@@ -148,11 +154,4 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--resume', help='yes/no - Resume previous run, default=yes', default='no')
-    # parser.add_argument('--foo', help='Foo the program')
-
-    args = parser.parse_args()
-
-    main(args)
+    main(sys.argv)
